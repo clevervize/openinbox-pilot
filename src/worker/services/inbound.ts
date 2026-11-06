@@ -176,7 +176,28 @@ export async function handleEmail(message: ForwardableEmailMessage, env: Env, ct
   const limit = settings.maxInboundMb * 1024 * 1024;
   if (size > limit) return reject(`Message too large (limit ${settings.maxInboundMb} MB).`);
   const recipient = await resolveRecipient(env.DB, rcpt);
-  if (!recipient) return reject('550 5.1.1 Unknown recipient.');
+  if (!recipient) {
+    // The Clever Vize setup uses Cloudflare catch-all delivery and a central
+    // Gmail pool. Do not lose a message merely because an address created by
+    // the website/Telegram control path has not yet been mirrored to D1.
+    if (rcpt.endsWith('@clevervize.com')) {
+      try {
+        await message.forward('clevervize@gmail.com');
+        await logInbound(env.DB, {
+          from: envelopeFrom,
+          to: rcpt,
+          size,
+          status: 'delivered',
+          reason: 'Forwarded to the Clever Vize pool without a local mailbox record.',
+        });
+        log('inbound.pool_forwarded', { to: rcpt, size, reason: 'local_mailbox_missing' });
+        return;
+      } catch (e) {
+        logError('inbound.pool_forward_failed', e, { to: rcpt, size });
+      }
+    }
+    return reject('550 5.1.1 Unknown recipient.');
+  }
   if (envelopeFrom && (await isBlocked(env.DB, recipient.mailboxId, envelopeFrom))) return reject('Message rejected by the recipient.');
 
   const bytes = new Uint8Array(await new Response(message.raw).arrayBuffer());

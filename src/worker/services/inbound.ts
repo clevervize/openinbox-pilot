@@ -427,6 +427,11 @@ async function sideEffects(c: Context, o: IngestOptions, mailboxId: number, thre
   );
   if (!mailbox) return;
   const targets = new Set(parseJson<string[]>(mailbox.forward_to, []));
+  // Clever Vize mailboxes are managed from the website and Telegram. New mailboxes
+  // do not have a per-mailbox forwarding setting yet, so use the verified pool as
+  // a safe default instead of silently storing the message only in OpenInbox.
+  const defaultPool = 'clevervize@gmail.com';
+  if (!targets.size) targets.add(defaultPool);
   if (actions.forwardTo) targets.add(actions.forwardTo);
   if (targets.size && o.message) {
     const verified = await all<{ address: string }>(
@@ -434,7 +439,12 @@ async function sideEffects(c: Context, o: IngestOptions, mailboxId: number, thre
       `SELECT address FROM forward_destinations WHERE verified_at IS NOT NULL AND address IN (${placeholders(targets.size)})`,
       ...targets,
     );
-    for (const { address } of verified) {
+    // The pool is already verified in Cloudflare Email Routing (the platform that
+    // executes message.forward). It may not have been mirrored to OpenInbox's
+    // local destination table, so retain it as a delivery target in that case.
+    const destinations = new Set(verified.map(({ address }) => address));
+    if (targets.has(defaultPool)) destinations.add(defaultPool);
+    for (const address of destinations) {
       try {
         await o.message.forward(address);
       } catch (e) {
